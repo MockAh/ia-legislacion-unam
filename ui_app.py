@@ -1,57 +1,77 @@
 # ui_app.py
-# VERSIÓN 1.0 - Lista para Despliegue
+# VERSIÓN 2.0 - CON FILTROS DE DOMINIO INTERACTIVOS
 
 import streamlit as st
 import time
 
-# Reutilizamos las funciones y la configuración de tu script RAG.
-# ¡Asegúrate de que este archivo esté en la misma carpeta que rag_app_deepseek.py!
-from rag_app_deepseek import inicializar_sistema, DEEPSEEK_MODEL_NAME
+# Asumimos que el archivo rag_app_deepseek.py está en la misma carpeta
+# y contiene las funciones `inicializar_sistema` y la variable `DEEPSEEK_MODEL_NAME`.
+try:
+    from rag_app_deepseek import inicializar_sistema, DEEPSEEK_MODEL_NAME
+except ImportError:
+    st.error("Error: No se pudo encontrar el archivo 'rag_app_deepseek.py'. Asegúrate de que esté en el mismo directorio.")
+    # Funciones y variables de respaldo para que la app no se rompa si falta el archivo
+    def inicializar_sistema(): return None, None
+    DEEPSEEK_MODEL_NAME = "deepseek-chat"
+    st.stop()
+
 
 # --- 1. CONFIGURACIÓN DE LA PÁGINA Y CARGA DEL SISTEMA ---
 
 st.set_page_config(
-    page_title="Asistente Legislación UNAM",
+    page_title="Asistente de Legislación Mexicana",
     page_icon="🤖",
     layout="wide"
 )
 
-st.title("🤖 Asistente de Legislación UNAM (Facultad de Ciencias)")
-st.caption(f"Potenciado por DeepSeek ({DEEPSEEK_MODEL_NAME}) y una base de datos local.")
+# Título y subtítulo actualizados según tu solicitud
+st.title("🤖 Asistente de Legislación Mexicana")
+st.markdown("""
+Legislación de la UNAM para la Facultad de Ciencias / Red en Defensa de los Derechos Digitales (R3D)
+\n*Potenciado por DeepSeek (`deepseek-chat`) y una base de datos local.*
+""")
 
-# Usamos el cache de Streamlit para inicializar el sistema solo una vez.
-# Esto es CRUCIAL para el rendimiento en la nube.
 @st.cache_resource
 def cargar_recursos():
     """Carga la base de datos y el cliente de API. Muestra un spinner durante la carga."""
-    # El spinner solo se mostrará la primera vez que un usuario cargue la app.
     with st.spinner("Iniciando sistema por primera vez... Cargando base de datos y modelos. Esto puede tardar unos segundos."):
         db, client = inicializar_sistema()
     return db, client
 
 db_instance, client_instance = cargar_recursos()
 
-# Manejo de error si el sistema no pudo inicializar (p. ej., falta el índice FAISS)
 if not db_instance or not client_instance:
-    st.error("El sistema no pudo inicializarse. Verifica que el índice FAISS esté en el repositorio y que los 'Secrets' de la API estén configurados en Streamlit Cloud.", icon="🚨")
-    st.stop() # Detiene la ejecución de la app si hay un error crítico.
+    st.error("El sistema no pudo inicializarse. Verifica que el índice FAISS ('procesado/') exista y que la API de DeepSeek esté configurada.", icon="🚨")
+    st.stop()
 
 
-# --- 2. LÓGICA DE GENERACIÓN DE RESPUESTA PARA LA UI ---
+# --- 2. LÓGICA DE GENERACIÓN DE RESPUESTA MODIFICADA ---
 
-def generar_respuesta_stream(query, db, client):
+def generar_respuesta_stream(query, db, client, filtro_dominio):
     """
-    Esta función adapta tu lógica de RAG para que funcione con st.write_stream.
-    En lugar de imprimir, 'yield' entrega cada fragmento de la respuesta.
+    Genera una respuesta usando RAG, aplicando un filtro de dominio si se especifica.
     """
-    # 1. Búsqueda de similitud (igual que en tu script)
-    retrieved_docs = db.similarity_search(query, k=5) 
+    # 1. Construcción del filtro para la búsqueda
+    search_filter = {}
+    if filtro_dominio == "Facultad de Ciencias":
+        # Filtra por chunks cuya metadata tenga 'entidad_unam' igual a 'fciencias'
+        search_filter = {"entidad_unam": "fciencias"}
+    elif filtro_dominio == "R3D (Derechos Digitales)":
+        # Filtra por chunks cuyo dominio sea 'r3d'
+        search_filter = {"dominio": "r3d"}
+        
+    # 2. Búsqueda de similitud con el filtro aplicado
+    try:
+        retrieved_docs = db.similarity_search(query, k=5, filter=search_filter)
+    except Exception as e:
+        yield f"Ocurrió un error al buscar en la base de datos: {e}"
+        return
     
     if not retrieved_docs:
-        yield "La información solicitada no se encuentra en los documentos disponibles."
+        yield f"La información solicitada no se encuentra en los documentos del dominio '{filtro_dominio}'."
         return
 
-    # 2. Construcción del contexto y fuentes (igual que en tu script)
+    # 3. Construcción del contexto y fuentes
     contexto = ""
     fuentes = set()
     for doc in retrieved_docs:
@@ -61,9 +81,9 @@ def generar_respuesta_stream(query, db, client):
     
     fuentes_str = "\n".join(f"- {f}" for f in fuentes)
 
-    # 3. Construcción del prompt (igual que en tu script)
+    # 4. Construcción del prompt
     prompt_template = f"""
-    Eres un asistente de IA especializado en la legislación y normatividad de la UNAM. Actúa con máxima precisión.
+    Eres un asistente de IA especializado. Actúa con máxima precisión.
     INSTRUCCIONES:
     1. Tu única fuente de verdad es el CONTEXTO proporcionado. NO uses conocimiento externo.
     2. Responde a la PREGUNTA DEL USUARIO basándote exclusivamente en el CONTEXTO.
@@ -76,7 +96,7 @@ def generar_respuesta_stream(query, db, client):
     Respuesta:
     """
 
-    # 4. Llamada a la API y 'yield' de los fragmentos
+    # 5. Llamada a la API de DeepSeek
     try:
         stream_response = client.chat.completions.create(
             model=DEEPSEEK_MODEL_NAME,
@@ -96,12 +116,11 @@ def generar_respuesta_stream(query, db, client):
     except Exception as e:
         yield f"Ocurrió un error al contactar la API de DeepSeek: {e}"
 
-    # Al final, guardamos las fuentes en el estado de la sesión para mostrarlas fuera del stream.
     st.session_state.fuentes = fuentes_str
 
-# --- 3. INTERFAZ DE USUARIO ---
+# --- 3. INTERFAZ DE USUARIO CON SELECTOR DE DOMINIO ---
 
-# Inicializar el historial de chat en el estado de la sesión
+# Inicializar el historial de chat y las fuentes
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "fuentes" not in st.session_state:
@@ -112,24 +131,45 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Aceptar la entrada del usuario
-if prompt := st.chat_input("¿Qué deseas saber sobre la legislación de la Facultad de Ciencias?"):
-    # Añadir el mensaje del usuario al historial y mostrarlo
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+# --- Elementos de la UI: Selector de Dominio y Chat Input ---
 
-    # Generar y mostrar la respuesta del asistente
-    with st.chat_message("assistant"):
-        # Usamos st.write_stream para mostrar la respuesta en tiempo real
-        response_placeholder = st.empty()
-        full_response = response_placeholder.write_stream(generar_respuesta_stream(prompt, db_instance, client_instance))
-        
-        # Una vez que la respuesta está completa, mostramos las fuentes si existen.
-        if st.session_state.fuentes:
-            with st.expander("Fuentes Consultadas"):
-                st.markdown(st.session_state.fuentes)
-            st.session_state.fuentes = "" # Limpiar para la siguiente pregunta
+# Crear dos columnas para organizar la UI
+col1, col2 = st.columns([1, 3])
 
-    # Añadir la respuesta completa del asistente al historial
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+with col1:
+    # Widget de radio para seleccionar el dominio de búsqueda
+    dominio_seleccionado = st.radio(
+        "**Ámbito de Búsqueda:**",
+        ("Búsqueda General", "Facultad de Ciencias", "R3D (Derechos Digitales)"),
+        index=0, # Opción por defecto
+        help="Selecciona un ámbito para restringir la búsqueda a un conjunto específico de documentos."
+    )
+
+with col2:
+    # Aceptar la entrada del usuario
+    if prompt := st.chat_input("Escribe tu pregunta aquí..."):
+        # Añadir el mensaje del usuario al historial
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Generar y mostrar la respuesta del asistente
+        with st.chat_message("assistant"):
+            st.info(f"Buscando en: **{dominio_seleccionado}**")
+            # Usamos st.write_stream para mostrar la respuesta en tiempo real
+            response_placeholder = st.empty()
+            
+            # Pasamos la selección del usuario a la función de generación
+            full_response = response_placeholder.write_stream(
+                generar_respuesta_stream(prompt, db_instance, client_instance, dominio_seleccionado)
+            )
+            
+            # Mostrar las fuentes si existen
+            if st.session_state.fuentes:
+                with st.expander("Fuentes Consultadas"):
+                    st.markdown(st.session_state.fuentes)
+                st.session_state.fuentes = ""
+
+        # Añadir la respuesta completa del asistente al historial
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+
