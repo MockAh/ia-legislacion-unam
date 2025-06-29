@@ -1,7 +1,8 @@
 # ui_app.py
-# VERSIÓN 3.0 - SIMPLIFICADA USANDO RAG_ENGINE
+# VERSIÓN 4.0 - FINAL, SINCRONIZADA CON RAG_ENGINE AVANZADO
 
 import streamlit as st
+import time
 
 # Importamos la instancia única del motor RAG desde nuestro backend
 try:
@@ -11,8 +12,12 @@ except ImportError as e:
     st.stop()
 
 
-# --- CONFIGURACIÓN DE LA PÁGINA Y CARGA DE RECURSOS ---
-st.set_page_config(page_title="Asistente de Legislación", page_icon="🤖", layout="wide")
+# --- 1. CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(
+    page_title="Asistente de Legislación",
+    page_icon="🤖",
+    layout="wide"
+)
 
 st.title("🤖 Asistente de Legislación")
 st.markdown("""
@@ -20,22 +25,22 @@ st.markdown("""
 \n*Potenciado por Búsqueda Híbrida y LLMs.*
 """)
 
-# La carga de recursos ahora es manejada internamente por la clase RAG_Engine
-# y se activa en la primera consulta. No necesitamos @st.cache_resource aquí.
+# --- 2. INTERFAZ DE USUARIO (CHAT) ---
 
-# --- INTERFAZ DE USUARIO ---
+# Inicializar el historial de chat en el estado de la sesión
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Mostrar historial de chat
+# Mostrar los mensajes del historial en cada recarga de la página
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Crear columnas para los controles
+# Crear columnas para organizar los controles de la UI
 col1, col2 = st.columns([1, 3])
 
 with col1:
+    # Widget para seleccionar el ámbito de búsqueda
     dominio_seleccionado = st.radio(
         "**Ámbito de Búsqueda:**",
         ("Búsqueda General", "Facultad de Ciencias", "R3D (Derechos Digitales)"),
@@ -44,8 +49,9 @@ with col1:
     )
 
 with col2:
+    # Aceptar la entrada del usuario con el input de chat de Streamlit
     if prompt := st.chat_input("Escribe tu pregunta aquí..."):
-        # Mostrar el mensaje del usuario
+        # Añadir y mostrar el mensaje del usuario en la UI
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -53,28 +59,34 @@ with col2:
         # Generar y mostrar la respuesta del asistente
         with st.chat_message("assistant"):
             st.info(f"Buscando en: **{dominio_seleccionado}**")
+            
+            # --- LÓGICA DE STREAMING CORREGIDA ---
+            # Usamos un bucle for manual para manejar los diferentes tipos de datos del stream
+            
             full_response = ""
             fuentes_encontradas = set()
-            
-            # Usamos un placeholder para el streaming de la respuesta
-            response_placeholder = st.empty()
+            response_placeholder = st.empty() # Placeholder para actualizar la respuesta en tiempo real
             
             # La llamada al backend ahora es una única función limpia
             for chunk in rag_engine.answer_question_stream(prompt, dominio_seleccionado):
+                # Verificamos si el chunk es el diccionario final de fuentes
                 if isinstance(chunk, dict) and 'fuentes' in chunk:
-                    # Este es el diccionario de fuentes que enviamos al final
                     fuentes_encontradas = chunk['fuentes']
+                    # Salimos del bucle una vez que recibimos las fuentes
+                    break 
                 else:
-                    # Esto es un trozo de texto de la respuesta
+                    # Si no es el diccionario, es un trozo de texto de la respuesta
                     full_response += chunk
-                    response_placeholder.markdown(full_response + "▌") # Muestra el cursor parpadeante
+                    # Actualizamos el placeholder con la respuesta acumulada y un cursor parpadeante
+                    response_placeholder.markdown(full_response + "▌")
             
-            response_placeholder.markdown(full_response) # Respuesta final
+            # Escribimos la respuesta final sin el cursor
+            response_placeholder.markdown(full_response)
             
-            # Mostrar las fuentes encontradas
+            # Mostrar las fuentes encontradas si existen
             if fuentes_encontradas:
                 with st.expander("Fuentes Consultadas"):
                     st.markdown("\n".join(f"- {f}" for f in fuentes_encontradas))
         
-        # Guardar la respuesta completa en el historial
+        # Guardar la respuesta completa en el historial para la sesión
         st.session_state.messages.append({"role": "assistant", "content": full_response})
