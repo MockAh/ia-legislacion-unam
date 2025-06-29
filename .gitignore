@@ -1,11 +1,31 @@
 # Entorno virtual de Python
 .venv/
 venv/
+env/
 
 # Archivos de caché de Python
-__pycache__/  # <--- ESTA LÍNEA ES TU GUARDIÁN
+__pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-# Archivo de variables de entorno (¡MUY IMPORTANTE!)
+# Archivos de configuración de IDEs
+.vscode/
+.idea/
+
+# Archivos de dependencias y secretos
 .env
+*.env
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Carpetas de datos generados y bases de datos
+procesado/
+*.faiss
+*.json
+
+# Archivos temporales de Office
+~$*
+
+# Registros y otros
+*.log

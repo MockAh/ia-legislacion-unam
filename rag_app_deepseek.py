@@ -1,164 +1,162 @@
-# === APLICACIÓN RAG CON DEEPSEEK (USANDO CLIENTE COMPATIBLE OPENAI) ===
-# VERSIÓN 2.0
+# === MOTOR RAG CON BÚSQUEDA HÍBRIDA Y ROUTER DE INTENCIÓN ===
+# VERSIÓN 4.1 - CORRECCIÓN DE UNBOUNDLOCALERROR
 
 import os
-import time
+import re
 from pathlib import Path
 from dotenv import load_dotenv
-from openai import OpenAI  # <--- CAMBIO IMPORTANTE: Importamos OpenAI en lugar de DeepSeek
-from langchain_community.embeddings import HuggingFaceEmbeddings
+
+# --- Importaciones modernizadas de LangChain ---
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
+from langchain_core.documents import Document
+from langchain_openai import ChatOpenAI
 
-# --- 1. CONFIGURACIÓN Y CARGA INICIAL ---
-
+# --- Carga inicial de configuración ---
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parent
-PROCESADO_DIR = BASE_DIR / "procesado"
-EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-DEEPSEEK_MODEL_NAME = "deepseek-chat"
+# --- FUNCIÓN DE DETECCIÓN DE INTENCIÓN ---
+def detectar_intencion_de_cita(query: str) -> tuple[bool, str]:
+    """Detecta si la pregunta del usuario es una solicitud de cita textual."""
+    patrones = [
+        r"c[íi]tame textualmente el art[íi]culo (\d+)",
+        r"qu[ée] dice el art[íi]culo (\d+)",
+        r"mu[ée]strame el art[íi]culo (\d+)",
+        r"ver textualmente el art[íi]culo (\d+)",
+        r"art[íi]culo (\d+) textualmente"
+    ]
+    for patron in patrones:
+        match = re.search(patron, query, re.IGNORECASE)
+        if match:
+            return True, match.group(1)
+    return False, None
 
-if not os.getenv("DEEPSEEK_API_KEY"):
-    raise ValueError("No se encontró la DEEPSEEK_API_KEY. Asegúrate de crear un archivo .env con tu clave.")
+# --- CLASE PRINCIPAL DEL MOTOR DE RAG ---
+class RAG_Engine:
+    def __init__(self, embedding_model="intfloat/multilingual-e5-large-instruct", llm_model="deepseek-chat"):
+        print("Inicializando motor de RAG...")
+        self.base_dir = Path(__file__).resolve().parent
+        self.output_dir = self.base_dir / "procesado"
+        self.embedding_model_name = embedding_model
+        self.llm_model_name = llm_model
+        if not os.getenv("DEEPSEEK_API_KEY"):
+            raise ValueError("No se encontró la DEEPSEEK_API_KEY en el archivo .env.")
+        self.db_faiss = None
+        self.all_docs = None
+        self.llm = None
+        self.is_loaded = False
+        print("Motor listo. Los componentes pesados se cargarán en la primera consulta.")
 
-print("✅ Configuración cargada.")
-
-# --- 2. INICIALIZACIÓN DE COMPONENTES ---
-
-def inicializar_sistema():
-    """
-    Carga todos los componentes necesarios para el RAG.
-    """
-    print("Iniciando componentes del sistema RAG...")
-
-    if not PROCESADO_DIR.exists() or not (PROCESADO_DIR / "index.faiss").exists():
-        print("\n--- ERROR ---")
-        print(f"El directorio '{PROCESADO_DIR}' o el índice FAISS no existen.")
-        print("Por favor, ejecuta primero 'script_embeddings_01.py' para generar la base de datos.")
-        return None, None
-
-    print(f"Cargando modelo de embeddings local: {EMBEDDING_MODEL}...")
-    try:
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={'device': 'cpu'}
+    def _load_components(self):
+        """Carga todos los componentes pesados una sola vez."""
+        if self.is_loaded: return
+        print("Cargando componentes pesados por primera vez...")
+        print(f"Cargando modelo de embeddings: {self.embedding_model_name}...")
+        embeddings = HuggingFaceEmbeddings(model_name=self.embedding_model_name)
+        print("Cargando base de datos vectorial FAISS...")
+        self.db_faiss = FAISS.load_local(str(self.output_dir), embeddings, allow_dangerous_deserialization=True)
+        print("Extrayendo documentos desde FAISS...")
+        self.all_docs = list(self.db_faiss.docstore._dict.values())
+        print("Configurando el LLM (DeepSeek)...")
+        self.llm = ChatOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1",
+            model=self.llm_model_name,
+            temperature=0.1, max_tokens=1500, streaming=True
         )
-    except Exception as e:
-        print(f"Error al cargar el modelo de embeddings: {e}")
-        return None, None
+        self.is_loaded = True
+        print("¡Todos los componentes base han sido cargados!")
 
-    print("Cargando base de datos vectorial FAISS...")
-    try:
-        db = FAISS.load_local(
-            str(PROCESADO_DIR),
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
-    except Exception as e:
-        print(f"Error al cargar la base de datos FAISS: {e}")
-        return None, None
+    def _get_retriever(self, filtro_dominio: str):
+        """Construye y devuelve el retriever híbrido aplicando el filtro de dominio dinámico."""
+        print(f"Construyendo retriever para el dominio: '{filtro_dominio}'")
+        docs_filtrados = self.all_docs
+        if filtro_dominio == "Facultad de Ciencias":
+            docs_filtrados = [doc for doc in self.all_docs if doc.metadata.get('dominio') == 'legislacion_unam']
+        elif filtro_dominio == "R3D (Derechos Digitales)":
+            docs_filtrados = [doc for doc in self.all_docs if doc.metadata.get('dominio') == 'r3d']
+        if not docs_filtrados: return None
+        bm25_retriever = BM25Retriever.from_documents(documents=docs_filtrados); bm25_retriever.k = 4
+        search_filter = {}
+        if filtro_dominio == "Facultad de Ciencias": search_filter = {"dominio": "legislacion_unam"}
+        elif filtro_dominio == "R3D (Derechos Digitales)": search_filter = {"dominio": "r3d"}
+        faiss_retriever = self.db_faiss.as_retriever(search_type="similarity", search_kwargs={'k': 4, 'filter': search_filter if search_filter else None})
+        return EnsembleRetriever(retrievers=[bm25_retriever, faiss_retriever], weights=[0.5, 0.5])
 
-    # --- CAMBIO IMPORTANTE: INICIALIZACIÓN DEL CLIENTE ---
-    # Ahora usamos el cliente de OpenAI, pero le decimos que apunte a la URL de DeepSeek.
-    # Esta es la forma oficial y más estable de hacerlo.
-    print("Inicializando cliente compatible con OpenAI para DeepSeek...")
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url="https://api.deepseek.com/v1"
-    )
+    def format_docs_for_prompt(self, docs: list[Document]) -> tuple[str, set]:
+        """Formatea los documentos para el prompt y extrae las fuentes."""
+        contexto, fuentes = [], set()
+        for doc in docs:
+            # --- LA CORRECCIÓN ESTÁ AQUÍ ---
+            # 1. Primero asignamos 'meta'
+            meta = doc.metadata
+            # 2. Luego usamos 'meta' para obtener los demás valores
+            fuente = meta.get('source', 'N/A')
+            articulo = meta.get('article', None)
+            
+            header = f"Fuente: {fuente}" + (f", Artículo: {articulo}" if articulo else "")
+            contexto.append(f"---\n{header}\nTexto: {doc.page_content}\n---")
+            fuentes.add(fuente)
+        return "\n".join(contexto), fuentes
 
-    print("✅ Sistema RAG listo para operar.")
-    return db, client
+    def get_verbatim_text(self, article_number: str, filtro_dominio: str):
+        """Busca un artículo específico por su número y devuelve su texto formateado."""
+        self._load_components()
+        docs_a_buscar = self.all_docs
+        if filtro_dominio == "Facultad de Ciencias":
+            docs_a_buscar = [doc for doc in self.all_docs if doc.metadata.get('dominio') == 'legislacion_unam']
+        
+        for doc in docs_a_buscar:
+            if doc.metadata.get('article') == article_number:
+                fuente = doc.metadata.get('source', 'N/A')
+                respuesta = f"**Cita textual del Artículo {article_number} encontrado en la fuente: *{fuente}***\n\n---\n\n"
+                respuesta += doc.page_content
+                yield respuesta
+                yield {"fuentes": {fuente}}
+                return
+        yield f"No pude encontrar un Artículo con el número '{article_number}' en el ámbito de búsqueda seleccionado."
+        yield {"fuentes": set()}
 
-# --- 3. LÓGICA PRINCIPAL DEL RAG (Esta sección no necesita cambios) ---
+    def answer_question_stream(self, query: str, filtro_dominio: str):
+        """Función principal que actúa como un ROUTER."""
+        self._load_components()
+        es_cita, numero_articulo = detectar_intencion_de_cita(query)
 
-def obtener_respuesta_rag(db, client, query):
-    """
-    Realiza el ciclo completo de RAG: búsqueda, construcción del prompt y generación.
-    """
-    start_time = time.time()
+        if es_cita:
+            print(f"Intención detectada: Cita textual del artículo {numero_articulo}.")
+            yield from self.get_verbatim_text(numero_articulo, filtro_dominio)
+            return
+        
+        print("Intención detectada: Pregunta de razonamiento (RAG).")
+        try:
+            retriever = self._get_retriever(filtro_dominio)
+            if not retriever:
+                yield "No hay documentos en el dominio seleccionado para realizar la búsqueda."
+                return
+            retrieved_docs = retriever.invoke(query)
+            if not retrieved_docs:
+                yield f"No se encontró información relevante en el dominio '{filtro_dominio}'."
+                yield {"fuentes": set()}
+                return
+            contexto_str, fuentes = self.format_docs_for_prompt(retrieved_docs)
+            prompt_template = f"""
+            Eres un asistente experto. Usa solo el CONTEXTO para responder la PREGUNTA. Si la respuesta no está, dilo explícitamente. No cites fuentes aquí.
+            --- CONTEXTO ---
+            {contexto_str}
+            --- FIN DEL CONTEXTO ---
+            PREGUNTA DEL USUARIO: "{query}"
+            Respuesta:
+            """
+            print("Generando respuesta con el LLM...")
+            for chunk in self.llm.stream(prompt_template):
+                yield chunk.content
+            yield {"fuentes": fuentes}
+        except Exception as e:
+            print(f"Ocurrió un error en el motor de RAG: {e}")
+            yield f"Ocurrió un error al procesar su solicitud. Detalle técnico: {e}"
+            yield {"fuentes": set()}
 
-    try:
-        retrieved_docs = db.similarity_search(query, k=4)
-    except Exception as e:
-        print(f"Error durante la búsqueda de similitud: {e}")
-        return
-
-    contexto = ""
-    fuentes = set()
-
-    for doc in retrieved_docs:
-        contexto += f"--- Fragmento de: {doc.metadata.get('source', 'N/A')} ---\n"
-        contexto += f"{doc.page_content}\n"
-        contexto += f"[Metadatos: Título='{doc.metadata.get('titulo', 'N/A')}', Año='{doc.metadata.get('año', 'N/A')}']\n\n"
-        fuentes.add(doc.metadata.get('source', 'N/A'))
-
-    if not retrieved_docs:
-        print("\nNo se encontraron documentos relevantes en la base de datos.")
-        return
-
-    prompt_template = f"""
-    Eres un asistente de IA especializado en la legislación y normatividad de la UNAM, actuando con la máxima precisión y objetividad.
-    INSTRUCCIONES:
-    1. Tu única fuente de verdad es el CONTEXTO que te proporciono. NO uses conocimiento externo.
-    2. Responde a la PREGUNTA DEL USUARIO basándote exclusivamente en el CONTEXTO.
-    3. Si la respuesta no está en el CONTEXTO, responde: "La información solicitada no se encuentra en los documentos disponibles."
-    4. Al final de tu respuesta, DEBES citar las fuentes utilizadas bajo un título "Fuentes Consultadas:".
-    5. Responde siempre en español.
-    --- CONTEXTO ---
-    {contexto}
-    --- FIN DEL CONTEXTO ---
-    PREGUNTA DEL USUARIO: "{query}"
-    Respuesta:
-    """
-
-    print("\n\n--- Respuesta de DeepSeek ---")
-    try:
-        # ¡Esta parte del código funciona igual gracias a la compatibilidad de la API!
-        stream_response = client.chat.completions.create(
-            model=DEEPSEEK_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "Sigue las instrucciones del prompt del usuario."},
-                {"role": "user", "content": prompt_template}
-            ],
-            stream=True,
-            max_tokens=1024,
-            temperature=0.1
-        )
-
-        full_response = ""
-        for chunk in stream_response:
-            content = chunk.choices[0].delta.content
-            if content:
-                print(content, end="", flush=True)
-                full_response += content
-
-        end_time = time.time()
-        print(f"\n\n(Tiempo de respuesta: {end_time - start_time:.2f} segundos)")
-
-    except Exception as e:
-        print(f"\nError al llamar a la API de DeepSeek: {e}")
-
-
-# --- 4. PUNTO DE ENTRADA INTERACTIVO (Sin cambios) ---
-
-if __name__ == "__main__":
-    db_instance, client_instance = inicializar_sistema()
-
-    if db_instance and client_instance:
-        print("\n--- Asistente de Legislación UNAM (usando DeepSeek) ---")
-        print("Escribe tu pregunta y presiona Enter. Escribe 'salir' o presiona Ctrl+C para terminar.")
-
-        while True:
-            try:
-                user_query = input("\nPregunta: ")
-                if user_query.lower() in ["salir", "exit", "quit"]:
-                    break
-                if user_query:
-                    obtener_respuesta_rag(db_instance, client_instance, user_query)
-            except KeyboardInterrupt:
-                print("\n\nCerrando aplicación. ¡Hasta luego!")
-                break
-            except Exception as e:
-                print(f"Ocurrió un error inesperado: {e}")
-                break
+# --- Instancia única para ser usada por la UI ---
+rag_engine = RAG_Engine()
