@@ -1,8 +1,7 @@
 # ui_app.py
-# VERSIÓN 4.0 - FINAL, SINCRONIZADA CON RAG_ENGINE AVANZADO
+# VERSIÓN 5.0 - CON CARGA DE RECURSOS EN CACHÉ PARA DESPLIEGUE
 
 import streamlit as st
-import time
 
 # Importamos la instancia única del motor RAG desde nuestro backend
 try:
@@ -12,35 +11,51 @@ except ImportError as e:
     st.stop()
 
 
-# --- 1. CONFIGURACIÓN DE LA PÁGINA ---
+# --- 1. CONFIGURACIÓN DE LA PÁGINA Y CARGA DE RECURSOS ---
+
 st.set_page_config(
     page_title="Asistente de Legislación",
     page_icon="🤖",
     layout="wide"
 )
 
+# --- NUEVA FUNCIÓN DE CARGA CON CACHÉ ---
+@st.cache_resource
+def cargar_motor_rag():
+    """
+    Esta función carga la instancia del motor RAG y ejecuta la carga de componentes pesados.
+    El decorador @st.cache_resource asegura que esto se ejecute UNA SOLA VEZ
+    y el resultado se guarde en caché para toda la sesión de la app.
+    """
+    with st.spinner("Iniciando sistema por primera vez... Este proceso puede tardar varios minutos."):
+        # Forzamos la carga de todos los modelos y bases de datos aquí
+        rag_engine._load_components()
+    return rag_engine
+
+# --- LLAMADA INICIAL AL MOTOR ---
+# Esto ejecutará la carga la primera vez que se visite la página
+# y en las siguientes visitas, devolverá instantáneamente el objeto en caché.
+rag_engine_cargado = cargar_motor_rag()
+
 st.title("🤖 Asistente de Legislación")
 st.markdown("""
 *UNAM (Facultad de Ciencias) / Red en Defensa de los Derechos Digitales (R3D)*
-\n*Potenciado por Búsqueda Híbrida y LLMs.*
+\n*Potenciado por Búsqueda Híbrida (`e5-large`) y LLMs.*
 """)
+
 
 # --- 2. INTERFAZ DE USUARIO (CHAT) ---
 
-# Inicializar el historial de chat en el estado de la sesión
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Mostrar los mensajes del historial en cada recarga de la página
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Crear columnas para organizar los controles de la UI
 col1, col2 = st.columns([1, 3])
 
 with col1:
-    # Widget para seleccionar el ámbito de búsqueda
     dominio_seleccionado = st.radio(
         "**Ámbito de Búsqueda:**",
         ("Búsqueda General", "Facultad de Ciencias", "R3D (Derechos Digitales)"),
@@ -49,44 +64,31 @@ with col1:
     )
 
 with col2:
-    # Aceptar la entrada del usuario con el input de chat de Streamlit
     if prompt := st.chat_input("Escribe tu pregunta aquí..."):
-        # Añadir y mostrar el mensaje del usuario en la UI
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generar y mostrar la respuesta del asistente
         with st.chat_message("assistant"):
             st.info(f"Buscando en: **{dominio_seleccionado}**")
             
-            # --- LÓGICA DE STREAMING CORREGIDA ---
-            # Usamos un bucle for manual para manejar los diferentes tipos de datos del stream
-            
             full_response = ""
             fuentes_encontradas = set()
-            response_placeholder = st.empty() # Placeholder para actualizar la respuesta en tiempo real
+            response_placeholder = st.empty()
             
-            # La llamada al backend ahora es una única función limpia
-            for chunk in rag_engine.answer_question_stream(prompt, dominio_seleccionado):
-                # Verificamos si el chunk es el diccionario final de fuentes
+            # La llamada al backend ahora usa el motor cargado en caché
+            for chunk in rag_engine_cargado.answer_question_stream(prompt, dominio_seleccionado):
                 if isinstance(chunk, dict) and 'fuentes' in chunk:
                     fuentes_encontradas = chunk['fuentes']
-                    # Salimos del bucle una vez que recibimos las fuentes
                     break 
                 else:
-                    # Si no es el diccionario, es un trozo de texto de la respuesta
                     full_response += chunk
-                    # Actualizamos el placeholder con la respuesta acumulada y un cursor parpadeante
                     response_placeholder.markdown(full_response + "▌")
             
-            # Escribimos la respuesta final sin el cursor
             response_placeholder.markdown(full_response)
             
-            # Mostrar las fuentes encontradas si existen
             if fuentes_encontradas:
                 with st.expander("Fuentes Consultadas"):
                     st.markdown("\n".join(f"- {f}" for f in fuentes_encontradas))
         
-        # Guardar la respuesta completa en el historial para la sesión
         st.session_state.messages.append({"role": "assistant", "content": full_response})
