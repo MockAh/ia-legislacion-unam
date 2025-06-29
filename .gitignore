@@ -19,10 +19,9 @@ __pycache__/
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Carpetas de datos generados y bases de datos
-procesado/
-*.faiss
-*.json
+# NO IGNORAR 'procesado' PARA QUE GIT LFS PUEDA MANEJARLO
+# procesado/  <-- LÍNEA ELIMINADA O COMENTADA
+# *.faiss     <-- LÍNEA ELIMINADA O COMENTADA
 
 # Archivos temporales de Office
 ~$*
